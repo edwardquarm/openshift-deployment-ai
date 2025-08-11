@@ -1,0 +1,48 @@
+version: '2'
+image_name: llamastack-learn-mcp
+container_image: null
+
+apis:
+  - inference
+  - telemetry
+  - tool_runtime
+  - agents
+  - safety
+  - vector_io
+
+providers:
+  inference:
+    - provider_id: openai
+      provider_type: remote::openai
+      config:
+        api_key: ${env.OPENAI_API_KEY}
+  telemetry:
+    - provider_id: meta-reference
+      provider_type: inline::meta-reference
+      config:
+        sinks: ['console']
+  tool_runtime:
+    - provider_id: model-context-protocol
+      provider_type: remote::model-context-protocol
+      config: {}
+  agents:
+    - provider_id: meta-reference
+      provider_type: inline::meta-reference
+      config:
+        persistence_store:
+          type: sqlite
+          namespace: null
+          db_path: ./agents_store.db
+
+models:
+  - model_id: gpt-4-turbo
+    provider_id: openai
+    model_type: llm
+    provider_model_id: gpt-4-turbo
+tool_groups:
+  - toolgroup_id: mcp::kubectl-ai
+    provider_id: model-context-protocol
+    mcp_endpoint: 
+      uri: "http://localhost:9099/sse"
+server:
+  port: 8321
