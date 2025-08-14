@@ -19,4 +19,4 @@ Start llama stack mcp client
 
 Chat with the server by running the ``chat.py`` with the following command:
 
-``python chat.py localhost 8321``
+``python llama-stack/chat.py localhost 8321``

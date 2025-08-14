@@ -25,6 +25,10 @@ providers:
     - provider_id: model-context-protocol
       provider_type: remote::model-context-protocol
       config: {}
+    - provider_id: brave-search
+      provider_type: remote::brave-search
+      config:
+        api_key: ${env.BRAVE_SEARCH_API_KEY}
   agents:
     - provider_id: meta-reference
       provider_type: inline::meta-reference
@@ -43,6 +47,10 @@ tool_groups:
   - toolgroup_id: mcp::kubectl-ai
     provider_id: model-context-protocol
     mcp_endpoint: 
-      uri: "http://localhost:9099/sse"
+      uri: "http://localhost:9080/sse"
+  - toolgroup_id: mcp::brave-search
+    provider_id: brave-search
+    mcp_endpoint:
+      uri: "https://api.brave.com/search/v1"
 server:
   port: 8321
