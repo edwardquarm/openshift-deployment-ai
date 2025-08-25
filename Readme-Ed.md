@@ -1,22 +1,64 @@
-Start kubectl-ai with web UI
+# Configure External Tools
 
-``export OPENAI_API_KEY=your_openai_api_key_here``
+Create or edit your MCP configuration file:
 
-``kubectl-ai --llm-provider=openai --model=gpt-4.1 --ui-type web``
+```bash
+cat > ~/.config/kubectl-ai/mcp.yaml
+```
 
-Start mcp server
+Example `mcp.yaml`:
+```yaml
+servers:
+  brave-search:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-brave-search"]
+    env:
+      BRAVE_API_KEY: "${BRAVE_SEARCH_API_KEY}"
+```
 
-``kubectl-ai --mcp-server --mcp-server-mode=sse --sse-endpoint-port=9080``
+# Custom tools configuration
 
-Start kubectl mcp server with external tools
+```bash
+cat <<EOF > ~/.config/kubectl-ai/config.yaml
+toolConfigPaths: ["~/.config/kubectl-ai/tools.yaml"]
+EOF
+```
 
-``kubectl-ai --mcp-server --external-tools --mcp-server-mode=sse --sse-endpoint-port=9080 -v=2``
+```bash
+cp contrib/openshift/tools.yaml ~/.config/kubectl-ai/tools.yaml
+```
 
-Start llama stack mcp client
+# Start kubectl-ai with Web UI
 
-``llama stack run llama-stack/mcp.yml``
+Set your OpenAI API key and launch the web UI:
 
+```bash
+export OPENAI_API_KEY=your_openai_api_key_here
+kubectl-ai --llm-provider=openai --model=gpt-4.1 --ui-type web
+```
 
-Chat with the server by running the ``chat.py`` with the following command:
+# Start MCP Server
 
-``python llama-stack/chat.py localhost 8321``
+```bash
+kubectl-ai --mcp-server --mcp-server-mode=sse --sse-endpoint-port=9080
+```
+
+# Start MCP Server with External Tools
+
+```bash
+kubectl-ai --mcp-server --external-tools --mcp-server-mode=sse --sse-endpoint-port=9080 -v=2
+```
+
+# Start Llama Stack MCP Client
+
+```bash
+llama stack run llama-stack/mcp.yml
+```
+
+# Chat with the Server
+
+Run the chat client:
+
+```bash
+python llama-stack/chat.py localhost 8321
+```

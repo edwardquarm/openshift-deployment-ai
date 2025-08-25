@@ -1,0 +1,201 @@
+# Custom tools for kubectl-ai to work with OpenShift (oc) and Templates.
+- name: oc_raw
+  description: >
+    Low-level OpenShift CLI runner. Use ONLY when a more specific tool doesn't fit.
+    Prefer the other scoped tools first.
+  command: "oc"
+  command_desc: |
+    Execute arbitrary oc subcommands. Examples:
+      - oc get pods -n redhat-ods-applications
+      - oc describe deployment -n myns my-deploy
+      - oc api-resources
+    Notes:
+      - Keep read-only by default (get/describe/logs/status). Use mutating commands sparingly.
+      - When mutating, prefer explicit tools (process+apply, apply, delete, scale).
+
+- name: oc_whoami
+  description: Show the current user/account and API server context.
+  command: "oc"
+  command_desc: |
+    Examples:
+      - oc whoami
+      - oc whoami --show-server
+      - oc config current-context
+
+- name: oc_get
+  description: >
+    Read-only getter for common resources across namespaces.
+    Use to list or fetch resources safely.
+  command: "oc"
+  command_desc: |
+    Get resources across namespaces. Examples:
+      - oc get pods -n <namespace>
+      - oc get deployments -n <namespace>
+      - oc get template -n redhat-ods-applications
+      - oc get route -n <namespace>
+      - oc get all -n <namespace>
+    Notes:
+      - Use with `-o yaml` or `-o json` for detailed output.
+      - Avoid using with mutating commands.
+
+- name: oc_get_templates
+  description: >
+    List available Templates (e.g., caikit, vLLM, OVMS) in redhat-ods-applications.
+  command: "oc"
+  command_desc: |
+    Examples:
+      - oc get templates -n redhat-ods-applications
+      - oc describe template -n redhat-ods-applications <template-name>
+
+- name: oc_process_templates
+  description: >
+    Create objects from a template by processing the template and piping the output to oc create.
+    Use to instantiate applications from templates.
+  command: "oc"
+  command_desc: |
+    Process a template and create resources. Examples:
+      - oc process -f <template-file> | oc create -f -
+      - oc process <template> | oc create -f -
+      - oc process <template> -p PARAM1=value1 -p PARAM2=value2 | oc create -f -
+    Notes:
+      - Always pipe to `oc create -f -` to apply the processed template.
+      - Ensure you have the necessary permissions to create resources.
+
+# --------- OpenShift LLM InferenceService (vLLM) ----------
+- name: oc_apply_isvc_vllm
+  description: >
+    Apply a vLLM-based KServe InferenceService on OpenShift. Supports a safe server-side dry-run first.
+    Parameters (required): NAME, NAMESPACE, STORAGE_URI, RUNTIME (e.g. vllm-cuda-runtime), IMAGE_PULL_SECRET.
+    Optional: MIN_REPLICAS, MAX_REPLICAS, CPU_REQ, MEM_REQ, CPU_LIMIT, MEM_LIMIT, EXTRA_ARGS (newline-separated).
+  command: "bash"
+  command_desc: |
+    # Expected env vars:
+    #   NAME, NAMESPACE, STORAGE_URI, RUNTIME, IMAGE_PULL_SECRET
+    #   MIN_REPLICAS, MAX_REPLICAS (default 1)
+    #   CPU_REQ, MEM_REQ, CPU_LIMIT, MEM_LIMIT
+    #   EXTRA_ARGS (newline-separated args; each line becomes an item in args)
+    #
+    # Preview first (server-side dry-run), then apply if preview succeeds.
+    bash -lc '
+      set -euo pipefail
+      : "${NAME:?NAME required}"
+      : "${NAMESPACE:?NAMESPACE required}"
+      : "${STORAGE_URI:?STORAGE_URI required}"
+      : "${RUNTIME:?RUNTIME required}"
+      : "${IMAGE_PULL_SECRET:?IMAGE_PULL_SECRET required}"
+
+      MIN_REPLICAS="${MIN_REPLICAS:-1}"
+      MAX_REPLICAS="${MAX_REPLICAS:-1}"
+      CPU_REQ="${CPU_REQ:-2}"
+      MEM_REQ="${MEM_REQ:-15Gi}"
+      CPU_LIMIT="${CPU_LIMIT:-3}"
+      MEM_LIMIT="${MEM_LIMIT:-16Gi}"
+      EXTRA_ARGS_CONTENT="${EXTRA_ARGS:-}"
+
+      ARGS_BLOCK=""
+      if [ -n "$EXTRA_ARGS_CONTENT" ]; then
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          ARGS_BLOCK="${ARGS_BLOCK}                - \"${line}\"\n"
+        done <<< "$EXTRA_ARGS_CONTENT"
+      else
+        ARGS_BLOCK=$(cat <<EOF
+                - "--uvicorn-log-level=info"
+                - "--max-model-len=2048"
+                - "--trust-remote-code"
+                - "--distributed-executor-backend=mp"
+EOF
+)
+      fi
+
+      TMPYAML="$(mktemp)"
+      cat > "$TMPYAML" <<EOF
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: ${NAME}
+  namespace: ${NAMESPACE}
+  annotations:
+    openshift.io/display-name: vLLM Serverless Deployment ${NAME}
+    serving.kserve.io/deploymentMode: Serverless
+    sidecar.istio.io/inject: "true"
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  predictor:
+    imagePullSecrets:
+      - name: ${IMAGE_PULL_SECRET}
+    minReplicas: ${MIN_REPLICAS}
+    maxReplicas: ${MAX_REPLICAS}
+    model:
+      args:
+$(echo -e "$ARGS_BLOCK")
+      modelFormat:
+        name: vLLM
+      name: ""
+    resources:
+      requests:
+        cpu: ${CPU_REQ}
+        memory: ${MEM_REQ}
+      limits:
+        cpu: ${CPU_LIMIT}
+        memory: ${MEM_LIMIT}
+    runtime: ${RUNTIME}
+    storageUri: "${STORAGE_URI}"
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+EOF
+
+      echo "== Server-side dry-run =="
+      oc apply --dry-run=server -f "$TMPYAML" -n "$NAMESPACE"
+
+      echo "== Applying =="
+      oc apply -f "$TMPYAML" -n "$NAMESPACE"
+
+      echo "== Waiting for readiness (InferenceService/${NAME}) =="
+      oc wait --for=condition=Ready inferenceService/${NAME} -n "$NAMESPACE" --timeout=10m
+
+      echo "== Describe (summary) =="
+      oc describe inferenceService/${NAME} -n "$NAMESPACE" | sed -n "1,120p"
+    '
+
+- name: oc_get_isvc_status
+  description: Get status conditions and URL(s) for an InferenceService (succinct JSON).
+  command: "bash"
+  command_desc: |
+    # env: NAME, NAMESPACE
+    bash -lc '
+      : "${NAME:?NAME required}"
+      : "${NAMESPACE:?NAMESPACE required}"
+      oc get isvc "$NAME" -n "$NAMESPACE" -o json \
+        | jq "{name:.metadata.name, ns:.metadata.namespace, url:.status.url, \
+               components:.status.components, conditions:.status.conditions}"
+    '
+
+- name: oc_probe_isvc_url
+  description: Probe the InferenceService URL (HTTP GET) until 200 OK or timeout.
+  command: "bash"
+  command_desc: |
+    # env: NAME, NAMESPACE, TIMEOUT_SEC (default 120)
+    bash -lc '
+      : "${NAME:?NAME required}"
+      : "${NAMESPACE:?NAMESPACE required}"
+      TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
+      URL="$(oc get isvc "$NAME" -n "$NAMESPACE" -o jsonpath="{.status.url}" 2>/dev/null || true)"
+      if [ -z "$URL" ]; then
+        echo "No URL yet on status.url"
+        exit 1
+      fi
+      echo "Probing $URL ..."
+      END=$((SECONDS+TIMEOUT_SEC))
+      while [ $SECONDS -lt $END ]; do
+        CODE=$(curl -sk -o /dev/null -w "%{http_code}" "$URL" || true)
+        echo "HTTP $CODE"
+        [ "$CODE" = "200" ] && echo "OK" && exit 0
+        sleep 3
+      done
+      echo "Timed out waiting for 200 OK at $URL"
+      exit 2
+    '
