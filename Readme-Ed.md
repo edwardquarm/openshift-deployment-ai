@@ -49,6 +49,12 @@ kubectl-ai --mcp-server --mcp-server-mode=sse --sse-endpoint-port=9080
 kubectl-ai --mcp-server --external-tools --mcp-server-mode=sse --sse-endpoint-port=9080 -v=2
 ```
 
+# Start MCP Server with External Tools and Customized tools
+
+```bash
+kubectl-ai --mcp-server --custom-tools-config=~/.config/kubectl-ai/tools.yaml --external-tools --mcp-server-mode=sse --sse-endpoint-port=9080 -v=2
+```
+
 # Start Llama Stack MCP Client
 
 ```bash
