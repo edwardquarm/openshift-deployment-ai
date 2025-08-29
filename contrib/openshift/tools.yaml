@@ -1,201 +1,212 @@
-# Custom tools for kubectl-ai to work with OpenShift (oc) and Templates.
+# ------------------------------------------------------------
+# OpenShift (oc) tools for vLLM ServingRuntime + InferenceService (Serverless-first)
+# Typical flow:
+#   1) oc_ensure_namespace
+#   2) oc_apply_vllm_servingruntime
+#   3) oc_apply_isvc_vllm
+#   Or just call: oc_deploy_llm_serverless (runs all 3 in order).
+# ------------------------------------------------------------
+
+# --- Low-level helper ---------------------------------------------------------
 - name: oc_raw
-  description: >
-    Low-level OpenShift CLI runner. Use ONLY when a more specific tool doesn't fit.
-    Prefer the other scoped tools first.
+  description: Low-level oc runner for one-off commands (prefer scoped tools first).
   command: "oc"
   command_desc: |
-    Execute arbitrary oc subcommands. Examples:
-      - oc get pods -n redhat-ods-applications
-      - oc describe deployment -n myns my-deploy
-      - oc api-resources
-    Notes:
-      - Keep read-only by default (get/describe/logs/status). Use mutating commands sparingly.
-      - When mutating, prefer explicit tools (process+apply, apply, delete, scale).
+    # Examples:
+    #   oc get pods -n <ns>
+    #   oc describe deployment -n <ns> <name>
+    #   oc api-resources
 
-- name: oc_whoami
-  description: Show the current user/account and API server context.
-  command: "oc"
-  command_desc: |
-    Examples:
-      - oc whoami
-      - oc whoami --show-server
-      - oc config current-context
-
-- name: oc_get
-  description: >
-    Read-only getter for common resources across namespaces.
-    Use to list or fetch resources safely.
-  command: "oc"
-  command_desc: |
-    Get resources across namespaces. Examples:
-      - oc get pods -n <namespace>
-      - oc get deployments -n <namespace>
-      - oc get template -n redhat-ods-applications
-      - oc get route -n <namespace>
-      - oc get all -n <namespace>
-    Notes:
-      - Use with `-o yaml` or `-o json` for detailed output.
-      - Avoid using with mutating commands.
-
-- name: oc_get_templates
-  description: >
-    List available Templates (e.g., caikit, vLLM, OVMS) in redhat-ods-applications.
-  command: "oc"
-  command_desc: |
-    Examples:
-      - oc get templates -n redhat-ods-applications
-      - oc describe template -n redhat-ods-applications <template-name>
-
-- name: oc_process_templates
-  description: >
-    Create objects from a template by processing the template and piping the output to oc create.
-    Use to instantiate applications from templates.
-  command: "oc"
-  command_desc: |
-    Process a template and create resources. Examples:
-      - oc process -f <template-file> | oc create -f -
-      - oc process <template> | oc create -f -
-      - oc process <template> -p PARAM1=value1 -p PARAM2=value2 | oc create -f -
-    Notes:
-      - Always pipe to `oc create -f -` to apply the processed template.
-      - Ensure you have the necessary permissions to create resources.
-
-# --------- OpenShift LLM InferenceService (vLLM) ----------
-- name: oc_apply_isvc_vllm
-  description: >
-    Apply a vLLM-based KServe InferenceService on OpenShift. Supports a safe server-side dry-run first.
-    Parameters (required): NAME, NAMESPACE, STORAGE_URI, RUNTIME (e.g. vllm-cuda-runtime), IMAGE_PULL_SECRET.
-    Optional: MIN_REPLICAS, MAX_REPLICAS, CPU_REQ, MEM_REQ, CPU_LIMIT, MEM_LIMIT, EXTRA_ARGS (newline-separated).
+# --- Ensure namespace (idempotent) --------------------------------------------
+- name: oc_ensure_namespace
+  description: Create a namespace if it does not exist (idempotent).
   command: "bash"
   command_desc: |
-    # Expected env vars:
-    #   NAME, NAMESPACE, STORAGE_URI, RUNTIME, IMAGE_PULL_SECRET
-    #   MIN_REPLICAS, MAX_REPLICAS (default 1)
-    #   CPU_REQ, MEM_REQ, CPU_LIMIT, MEM_LIMIT
-    #   EXTRA_ARGS (newline-separated args; each line becomes an item in args)
-    #
-    # Preview first (server-side dry-run), then apply if preview succeeds.
+    # env: NAMESPACE
+    bash -lc '
+      : "${NAMESPACE:?NAMESPACE required}"
+      if ! oc get ns "${NAMESPACE}" >/dev/null 2>&1; then
+        echo "Creating namespace ${NAMESPACE} ..."
+        oc create ns "${NAMESPACE}"
+      else
+        echo "Namespace ${NAMESPACE} already exists."
+      fi
+      oc get ns "${NAMESPACE}" -o yaml | sed -n "1,80p"
+    '
+
+# --- ServingRuntime (Serverless vLLM) -----------------------------------------
+- name: oc_apply_vllm_servingruntime
+  description: Create/Update a **Serverless** vLLM ServingRuntime in the target namespace.
+  command: "bash"
+  command_desc: |
+    # env:
+    #   NAMESPACE (required)
+    #   RUNTIME_NAME    (default: vllm-serverless-runtime)
+    #   RUNTIME_IMAGE   (default: quay.io/modh/vllm@sha256:db766445a1e3455e1bf7d16b008f8946fcbe9f277377af7abb81ae358805e7e2)
+    #   DISPLAY_NAME    (default: "vLLM NVIDIA GPU ServingRuntime for KServe")
+    #   RUNTIME_VERSION (default: v0.9.2.1)
+    bash -lc '
+      set -euo pipefail
+      : "${NAMESPACE:?NAMESPACE required}"
+      RUNTIME_NAME="${RUNTIME_NAME:-vllm-serverless-runtime}"
+      RUNTIME_IMAGE="${RUNTIME_IMAGE:-quay.io/modh/vllm@sha256:db766445a1e3455e1bf7d16b008f8946fcbe9f277377af7abb81ae358805e7e2}"
+      DISPLAY_NAME="${DISPLAY_NAME:-vLLM NVIDIA GPU ServingRuntime for KServe}"
+      RUNTIME_VERSION="${RUNTIME_VERSION:-v0.9.2.1}"
+
+      cat <<EOF | oc apply -f -
+    apiVersion: serving.kserve.io/v1alpha1
+    kind: ServingRuntime
+    metadata:
+      name: ${RUNTIME_NAME}
+      namespace: ${NAMESPACE}
+      annotations:
+        opendatahub.io/recommended-accelerators: '["nvidia.com/gpu"]'
+        opendatahub.io/runtime-version: ${RUNTIME_VERSION}
+        openshift.io/display-name: ${DISPLAY_NAME}
+      labels:
+        opendatahub.io/dashboard: "true"
+    spec:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+      supportedModelFormats:
+        - name: vLLM
+          version: ">=0"
+          autoSelect: true
+      multiModel: false
+      containers:
+        - name: kserve-container
+          image: ${RUNTIME_IMAGE}
+          command: ["python","-m","vllm.entrypoints.openai.api_server"]
+          args: ["--port=8080","--model=/mnt/models","--served-model-name={{.Name}}"]
+          env:
+            - name: HF_HOME
+              value: /tmp/hf_home
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+    EOF
+
+          echo "Applied Serverless ServingRuntime ${RUNTIME_NAME} in ${NAMESPACE}."
+          oc get servingruntime "${RUNTIME_NAME}" -n "${NAMESPACE}" -o yaml | sed -n "1,160p"
+        '
+
+# --- InferenceService (vLLM, Serverless) --------------------------------------
+- name: oc_apply_isvc_vllm
+  description: >
+    Create/Update a Serverless vLLM InferenceService on OpenShift.
+    Only required input is STORAGE_URI (defaults to Granite modelcar if omitted).
+  command: "bash"
+  command_desc: |
+    # env:
+    #   NAMESPACE      (default: vllm-ai)
+    #   NAME           (default: vllm-serve)
+    #   STORAGE_URI    (default: oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-base-quantized-w4a16:1.5)
+    #   RUNTIME_NAME   (default: vllm-serverless-runtime)  <-- must equal ServingRuntime.metadata.name
+    #   IMAGE_PULL_SECRET (optional)
+    #   GPU_REQ=1, CPU_REQ=2, MEM_REQ=15Gi
+    #   GPU_LIMIT=1, CPU_LIMIT=3, MEM_LIMIT=16Gi
+    #   ISTIO_SIDECAR=true
+    bash -lc '
+      set -euo pipefail
+      NAMESPACE="${NAMESPACE:-vllm-ai}"
+      NAME="${NAME:-vllm-serve}"
+      STORAGE_URI="${STORAGE_URI:-oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-base-quantized-w4a16:1.5}"
+      RUNTIME_NAME="${RUNTIME_NAME:-vllm-serverless-runtime}"
+      IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"
+      GPU_REQ="${GPU_REQ:-1}"
+      CPU_REQ="${CPU_REQ:-2}"
+      MEM_REQ="${MEM_REQ:-15Gi}"
+      GPU_LIMIT="${GPU_LIMIT:-1}"
+      CPU_LIMIT="${CPU_LIMIT:-3}"
+      MEM_LIMIT="${MEM_LIMIT:-16Gi}"
+      ISTIO_SIDECAR="${ISTIO_SIDECAR:-true}"
+
+      SECRET_BLOCK=""
+      if [ -n "$IMAGE_PULL_SECRET" ]; then
+        SECRET_BLOCK=$(cat <<EOF
+    imagePullSecrets:
+      - name: ${IMAGE_PULL_SECRET}
+    EOF
+    )
+          fi
+
+          cat <<EOF | oc apply -f -
+    apiVersion: serving.kserve.io/v1beta1
+    kind: InferenceService
+    metadata:
+      name: ${NAME}
+      namespace: ${NAMESPACE}
+      annotations:
+        serving.kserve.io/deploymentMode: Serverless
+        sidecar.istio.io/inject: "${ISTIO_SIDECAR}"
+        sidecar.istio.io/rewriteAppHTTPProbers: "true"
+    spec:
+      predictor:
+        ${SECRET_BLOCK}
+        model:
+          runtime: ${RUNTIME_NAME}
+          modelFormat:
+            name: vLLM
+          storageUri: "${STORAGE_URI}"
+          args:
+            - "--uvicorn-log-level=info"
+            - "--max-model-len=2048"
+            - "--trust-remote-code"
+            - "--distributed-executor-backend=mp"
+            - "--tensor-parallel-size=1"
+          resources:
+            requests:
+              cpu: "${CPU_REQ}"
+              memory: "${MEM_REQ}"
+              nvidia.com/gpu: "${GPU_REQ}"
+            limits:
+              cpu: "${CPU_LIMIT}"
+              memory: "${MEM_LIMIT}"
+              nvidia.com/gpu: "${GPU_LIMIT}"
+    EOF
+
+          echo "Waiting for InferenceService/${NAME} to become Ready ..."
+          oc wait --for=condition=Ready isvc/${NAME} -n "${NAMESPACE}" --timeout=10m || true
+          oc get isvc ${NAME} -n ${NAMESPACE} -o wide || true
+        '
+
+# --- Status helper ------------------------------------------------------------
+- name: oc_get_isvc_status
+  description: Show concise status for an InferenceService (URL, components, conditions).
+  command: "bash"
+  command_desc: |
+    # env: NAMESPACE, NAME
+    bash -lc '
+      : "${NAMESPACE:?NAMESPACE required}"
+      : "${NAME:?NAME required}"
+      oc get isvc "${NAME}" -n "${NAMESPACE}" -o json \
+        | jq "{name:.metadata.name, ns:.metadata.namespace, url:.status.url, components:.status.components, conditions:.status.conditions}"
+    '
+
+# --- One-shot orchestrator (recommended) --------------------------------------
+- name: oc_deploy_llm_serverless
+  description: Ensure namespace and vLLM Serverless ServingRuntime, then create ISVC and show status/URL.
+  command: "bash"
+  command_desc: |
+    # Required env: NAME, NAMESPACE
+    # Optional: STORAGE_URI, IMAGE_PULL_SECRET, RUNTIME_NAME
     bash -lc '
       set -euo pipefail
       : "${NAME:?NAME required}"
       : "${NAMESPACE:?NAMESPACE required}"
-      : "${STORAGE_URI:?STORAGE_URI required}"
-      : "${RUNTIME:?RUNTIME required}"
-      : "${IMAGE_PULL_SECRET:?IMAGE_PULL_SECRET required}"
+      export STORAGE_URI="${STORAGE_URI:-oci://registry.redhat.io/rhelai1/modelcar-granite-3-1-8b-base-quantized-w4a16:1.5}"
+      export RUNTIME_NAME="${RUNTIME_NAME:-vllm-serverless-runtime}"
 
-      MIN_REPLICAS="${MIN_REPLICAS:-1}"
-      MAX_REPLICAS="${MAX_REPLICAS:-1}"
-      CPU_REQ="${CPU_REQ:-2}"
-      MEM_REQ="${MEM_REQ:-15Gi}"
-      CPU_LIMIT="${CPU_LIMIT:-3}"
-      MEM_LIMIT="${MEM_LIMIT:-16Gi}"
-      EXTRA_ARGS_CONTENT="${EXTRA_ARGS:-}"
+      echo "== [1/3] Ensure namespace =="
+      kubectl-ai --tool oc_ensure_namespace
 
-      ARGS_BLOCK=""
-      if [ -n "$EXTRA_ARGS_CONTENT" ]; then
-        while IFS= read -r line; do
-          [ -z "$line" ] && continue
-          ARGS_BLOCK="${ARGS_BLOCK}                - \"${line}\"\n"
-        done <<< "$EXTRA_ARGS_CONTENT"
-      else
-        ARGS_BLOCK=$(cat <<EOF
-                - "--uvicorn-log-level=info"
-                - "--max-model-len=2048"
-                - "--trust-remote-code"
-                - "--distributed-executor-backend=mp"
-EOF
-)
-      fi
+      echo "== [2/3] Ensure ServingRuntime (${RUNTIME_NAME}) =="
+      kubectl-ai --tool oc_apply_vllm_servingruntime
 
-      TMPYAML="$(mktemp)"
-      cat > "$TMPYAML" <<EOF
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: ${NAME}
-  namespace: ${NAMESPACE}
-  annotations:
-    openshift.io/display-name: vLLM Serverless Deployment ${NAME}
-    serving.kserve.io/deploymentMode: Serverless
-    sidecar.istio.io/inject: "true"
-  labels:
-    opendatahub.io/dashboard: "true"
-spec:
-  predictor:
-    imagePullSecrets:
-      - name: ${IMAGE_PULL_SECRET}
-    minReplicas: ${MIN_REPLICAS}
-    maxReplicas: ${MAX_REPLICAS}
-    model:
-      args:
-$(echo -e "$ARGS_BLOCK")
-      modelFormat:
-        name: vLLM
-      name: ""
-    resources:
-      requests:
-        cpu: ${CPU_REQ}
-        memory: ${MEM_REQ}
-      limits:
-        cpu: ${CPU_LIMIT}
-        memory: ${MEM_LIMIT}
-    runtime: ${RUNTIME}
-    storageUri: "${STORAGE_URI}"
-    tolerations:
-      - key: nvidia.com/gpu
-        operator: Exists
-        effect: NoSchedule
-EOF
+      echo "== [3/3] Apply InferenceService (${NAME}) =="
+      kubectl-ai --tool oc_apply_isvc_vllm
 
-      echo "== Server-side dry-run =="
-      oc apply --dry-run=server -f "$TMPYAML" -n "$NAMESPACE"
-
-      echo "== Applying =="
-      oc apply -f "$TMPYAML" -n "$NAMESPACE"
-
-      echo "== Waiting for readiness (InferenceService/${NAME}) =="
-      oc wait --for=condition=Ready inferenceService/${NAME} -n "$NAMESPACE" --timeout=10m
-
-      echo "== Describe (summary) =="
-      oc describe inferenceService/${NAME} -n "$NAMESPACE" | sed -n "1,120p"
-    '
-
-- name: oc_get_isvc_status
-  description: Get status conditions and URL(s) for an InferenceService (succinct JSON).
-  command: "bash"
-  command_desc: |
-    # env: NAME, NAMESPACE
-    bash -lc '
-      : "${NAME:?NAME required}"
-      : "${NAMESPACE:?NAMESPACE required}"
-      oc get isvc "$NAME" -n "$NAMESPACE" -o json \
-        | jq "{name:.metadata.name, ns:.metadata.namespace, url:.status.url, \
-               components:.status.components, conditions:.status.conditions}"
-    '
-
-- name: oc_probe_isvc_url
-  description: Probe the InferenceService URL (HTTP GET) until 200 OK or timeout.
-  command: "bash"
-  command_desc: |
-    # env: NAME, NAMESPACE, TIMEOUT_SEC (default 120)
-    bash -lc '
-      : "${NAME:?NAME required}"
-      : "${NAMESPACE:?NAMESPACE required}"
-      TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
-      URL="$(oc get isvc "$NAME" -n "$NAMESPACE" -o jsonpath="{.status.url}" 2>/dev/null || true)"
-      if [ -z "$URL" ]; then
-        echo "No URL yet on status.url"
-        exit 1
-      fi
-      echo "Probing $URL ..."
-      END=$((SECONDS+TIMEOUT_SEC))
-      while [ $SECONDS -lt $END ]; do
-        CODE=$(curl -sk -o /dev/null -w "%{http_code}" "$URL" || true)
-        echo "HTTP $CODE"
-        [ "$CODE" = "200" ] && echo "OK" && exit 0
-        sleep 3
-      done
-      echo "Timed out waiting for 200 OK at $URL"
-      exit 2
+      echo "== URL / Status =="
+      oc get isvc "$NAME" -n "$NAMESPACE" -o json | jq "{url:.status.url, conditions:.status.conditions}" || true
     '
