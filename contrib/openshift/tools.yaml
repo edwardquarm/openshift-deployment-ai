@@ -210,3 +210,53 @@
       echo "== URL / Status =="
       oc get isvc "$NAME" -n "$NAMESPACE" -o json | jq "{url:.status.url, conditions:.status.conditions}" || true
     '
+
+# --- OpenShift Template discovery (cluster / namespace) ---
+- name: oc_list_templates_all
+  description: List all OpenShift Templates across all namespaces.
+  command: "bash"
+  command_desc: |
+    bash -lc '
+      oc get template -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers || true
+    '
+
+- name: oc_list_templates_in_ns
+  description: List OpenShift Templates in a specific namespace (e.g., redhat-ods-applications).
+  command: "bash"
+  command_desc: |
+    # env: NAMESPACE (required)
+    bash -lc '
+      : "${NAMESPACE:?NAMESPACE required}"
+      oc get template -n "$NAMESPACE" -o wide || true
+    '
+
+- name: oc_find_ovms_templates
+  description: Find OpenVINO/OVMS Templates (e.g., kserve-ovms, ovms) in common namespaces.
+  command: "bash"
+  command_desc: |
+    bash -lc '
+      for ns in redhat-ods-applications redhat-ods-operator default; do
+        echo "=== $ns ==="
+        oc get template -n "$ns" --no-headers 2>/dev/null | grep -E "(kserve-ovms|^ovms$)" || true
+      done
+    '
+
+# --- Instantiate a template (process -> create/apply) ---
+- name: oc_process_template_to_apply
+  description: Process an OpenShift Template and apply the rendered resources.
+  command: "bash"
+  command_desc: |
+    # env: NAMESPACE (required), TEMPLATE_NAME (required), PARAMS (optional, space-separated KEY=VAL)
+    # Example: PARAMS="MODEL_NAME=iris STORAGE_URI=pvc://..." TEMPLATE_NAME=kserve-ovms NAMESPACE=my-ns
+    bash -lc '
+      : "${NAMESPACE:?NAMESPACE required}"
+      : "${TEMPLATE_NAME:?TEMPLATE_NAME required}"
+      PARAMS_ARR=()
+      if [ -n "${PARAMS:-}" ]; then
+        for kv in ${PARAMS}; do PARAMS_ARR+=("-p" "$kv"); done
+      fi
+      # Server-side dry run first
+      oc process -n "$NAMESPACE" "$TEMPLATE_NAME" "${PARAMS_ARR[@]}" | oc apply --dry-run=server -f -
+      # Then apply
+      oc process -n "$NAMESPACE" "$TEMPLATE_NAME" "${PARAMS_ARR[@]}" | oc apply -f -
+    '

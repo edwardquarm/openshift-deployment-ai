@@ -68,3 +68,40 @@ Run the chat client:
 ```bash
 python llama-stack/chat.py localhost 8321
 ```
+
+
+## Alternative approach
+
+# Integrate with Vscode
+
+``
+{
+  "servers": {
+    "kubectl-ai": {
+      "type": "stdio",
+      "command": "kubectl-ai",
+      "args": [
+        "--mcp-server",
+        "--external-tools",
+        "--custom-tools-config", "/Users/<edwardquarm>/.config/kubectl-ai/tools.yaml"
+      ],
+      "env": {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
+      }
+    }
+  }
+}
+``
+# Build the depoloyment assistant image
+
+``podman build -t quay.io/rh-ee-equarmjn/kubectl-ai:latest -f images/kubectl-ai/Dockerfile-oc .``
+
+``podman push quay.io/rh-ee-equarmjn/kubectl-ai:latest``
+
+# Run the deployment assistant
+
+``podman run --rm -p 9080:9080 \
+  -v "$HOME/.kube/config:/kube/config:ro,Z" \
+  -e KUBECONFIG=/kube/config \
+  quay.io/your-org/kubectl-ai:latest``
+
