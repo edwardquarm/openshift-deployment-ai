@@ -210,3 +210,120 @@
       echo "== URL / Status =="
       oc get isvc "$NAME" -n "$NAMESPACE" -o json | jq "{url:.status.url, conditions:.status.conditions}" || true
     '
+
+# --- OpenShift Template discovery (cluster / namespace) ---
+- name: oc_list_templates_all
+  description: List all OpenShift Templates across all namespaces.
+  command: "bash"
+  command_desc: |
+    bash -lc '
+      oc get template -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name --no-headers || true
+    '
+
+- name: oc_list_templates_in_ns
+  description: List OpenShift Templates in a specific namespace (e.g., redhat-ods-applications).
+  command: "bash"
+  command_desc: |
+    # env: NAMESPACE (required)
+    bash -lc '
+      : "${NAMESPACE:?NAMESPACE required}"
+      oc get template -n "$NAMESPACE" -o wide || true
+    '
+
+- name: oc_find_ovms_templates
+  description: Find OpenVINO/OVMS Templates (e.g., kserve-ovms, ovms) in common namespaces.
+  command: "bash"
+  command_desc: |
+    bash -lc '
+      found=0
+      for ns in redhat-ods-applications redhat-ods-operator openshift-operators default; do
+        out="$(oc get template -n "$ns" --no-headers 2>/dev/null | awk "{print \\$1}" | grep -E "^(kserve-ovms|ovms)$" || true)"
+        if [ -n "$out" ]; then
+          found=1
+          echo "=== $ns ==="
+          oc get template -n "$ns" kserve-ovms -o yaml 2>/dev/null | sed -n "1,40p" || true
+          oc get template -n "$ns" ovms -o yaml 2>/dev/null | sed -n "1,40p" || true
+        fi
+      done
+      if [ "$found" -eq 0 ]; then
+        echo "No OVMS templates (kserve-ovms/ovms) found in common namespaces."
+      fi
+    '
+
+# --- Instantiate a template (process -> apply) ---
+- name: oc_process_template_to_apply
+  description: >
+    Process an OpenShift Template from TEMPLATE_NS and apply the rendered resources into TARGET_NS.
+    PARAMS is optional (space-separated KEY=VAL).
+  command: "bash"
+  command_desc: |
+    # env: TEMPLATE_NS (required), TEMPLATE_NAME (required), TARGET_NS (required), PARAMS (optional)
+    # Example:
+    #   TEMPLATE_NS=redhat-ods-applications TEMPLATE_NAME=kserve-ovms TARGET_NS=my-ns \
+    #   PARAMS="MODEL_NAME=iris STORAGE_URI=pvc://..." 
+    bash -lc '
+      set -euo pipefail
+      : "${TEMPLATE_NS:?TEMPLATE_NS required}"
+      : "${TEMPLATE_NAME:?TEMPLATE_NAME required}"
+      : "${TARGET_NS:?TARGET_NS required}"
+      PARAMS_ARR=()
+      if [ -n "${PARAMS:-}" ]; then
+        # shellcheck disable=SC2206
+        for kv in ${PARAMS}; do PARAMS_ARR+=("-p" "$kv"); done
+      fi
+      echo "Dry-run processing template ${TEMPLATE_NAME} from ${TEMPLATE_NS} -> applying to ${TARGET_NS}"
+      oc process -n "$TEMPLATE_NS" "$TEMPLATE_NAME" "${PARAMS_ARR[@]}" \
+        | oc apply --dry-run=server -n "$TARGET_NS" -f -
+      echo "Applying ..."
+      oc process -n "$TEMPLATE_NS" "$TEMPLATE_NAME" "${PARAMS_ARR[@]}" \
+        | oc apply -n "$TARGET_NS" -f -
+    '
+
+# --- Convenience: instantiate OVMS runtime into a target namespace ---
+- name: oc_instantiate_ovms_runtime
+  description: >
+    Instantiate the OpenVINO Model Server ServingRuntime from an installed template
+    (prefers 'kserve-ovms', falls back to 'ovms') into TARGET_NS.
+  command: "bash"
+  command_desc: |
+    # env: TARGET_NS (required), TEMPLATE_NS (optional; default redhat-ods-applications), TEMPLATE_NAME (optional)
+    # If TEMPLATE_NAME is not set, will prefer kserve-ovms, else ovms.
+    bash -lc '
+      set -euo pipefail
+      : "${TARGET_NS:?TARGET_NS required}"
+      TEMPLATE_NS="${TEMPLATE_NS:-redhat-ods-applications}"
+      if [ -z "${TEMPLATE_NAME:-}" ]; then
+        if oc get template -n "$TEMPLATE_NS" kserve-ovms >/dev/null 2>&1; then
+          TEMPLATE_NAME="kserve-ovms"
+        elif oc get template -n "$TEMPLATE_NS" ovms >/dev/null 2>&1; then
+          TEMPLATE_NAME="ovms"
+        else
+          echo "No OVMS template (kserve-ovms/ovms) found in namespace: ${TEMPLATE_NS}"
+          exit 1
+        fi
+      fi
+      echo "Using template ${TEMPLATE_NAME} from ${TEMPLATE_NS} -> target ${TARGET_NS}"
+      # Many of these templates do not require params for the ServingRuntime itself
+      oc process -n "$TEMPLATE_NS" "$TEMPLATE_NAME" \
+        | oc apply --dry-run=server -n "$TARGET_NS" -f -
+      oc process -n "$TEMPLATE_NS" "$TEMPLATE_NAME" \
+        | oc apply -n "$TARGET_NS" -f -
+      echo "Done. Current ServingRuntimes in ${TARGET_NS}:"
+      oc get servingruntime -n "$TARGET_NS" -o wide || true
+    '
+
+# --- (Optional) Check if a ServingRuntime exists by name in a namespace ---
+- name: oc_check_servingruntime
+  description: Check if a ServingRuntime named RUNTIME_NAME exists in TARGET_NS.
+  command: "bash"
+  command_desc: |
+    # env: TARGET_NS (required), RUNTIME_NAME (required)
+    bash -lc '
+      : "${TARGET_NS:?TARGET_NS required}"
+      : "${RUNTIME_NAME:?RUNTIME_NAME required}"
+      if oc get servingruntime -n "$TARGET_NS" "$RUNTIME_NAME" >/dev/null 2>&1; then
+        echo "FOUND"
+      else
+        echo "MISSING"
+      fi
+    '
